@@ -81,6 +81,56 @@ See `src/teleop_config.yaml` for the full, annotated field list (recording, URDF
 
 **Resolution order** for both `teleop_config.yaml` and the extrinsics JSON: an environment variable (`LEROBOT_3D_TELEOP_CONFIG` / `LEROBOT_3D_EXTRINSIC_JSON`) → the current working directory → `src/<file>` next to the installed package (dev checkout).
 
+## Recording a LeRobotDataset
+
+Set `dataset_repo_id` in `teleop_config.yaml` to record teleop episodes into a [LeRobotDataset](https://github.com/huggingface/lerobot):
+
+```yaml
+dataset_repo_id: local/my_task   # empty disables recording
+dataset_root: null               # null -> HF_LEROBOT_HOME/<repo_id>; an existing dataset is appended to
+dataset_task: teleop             # task string stored with every frame
+dataset_fps: 15                  # the teleop loop runs at this rate while recording is configured
+```
+
+Then run `lerobot-teleop` and use the terminal (it needs focus):
+
+- **Enter** — start an episode.
+- **Space** — end it. You're asked `Keep? [y/n]`: **y** saves it (encodes video), **n** discards it.
+- Quitting (viser **Quit** or Ctrl+C) discards an unsaved episode and finalizes the dataset.
+
+Teleop and the viser view keep running in every state. If a step can't keep up with `dataset_fps`, a warning is printed. Recorded timestamps assume a fixed rate, so lower `dataset_fps` (or the camera resolution) if you see it.
+
+Each frame stores (`<serial>` = camera serial, `<link>` = URDF link name):
+
+| key | shape | contents |
+|---|---|---|
+| `action` | `(J,)` float32 | motor-space action sent to the follower |
+| `observation.state` | `(J,)` float32 | follower joint positions (motor space) |
+| `observation.images.<serial>` | video `(H, W, 3)` | RGB |
+| `observation.depth.<serial>` | image `(H, W, 3)` | uint16 depth packed losslessly into R (high byte) / G (low byte) |
+| `observation.depth_scale.<serial>` | `(1,)` float32 | meters per depth unit |
+| `observation.intrinsics.<serial>` | `(3, 3)` float32 | color camera K (depth is aligned to color) |
+| `observation.extrinsics.<serial>` | `(4, 4)` float32 | `X_WC`, camera → world |
+| `observation.robot_link_pcds.<link>` | `(N, 3)` float32 | world-frame link points. Point `k` of a link is the same body point in every frame. |
+
+Joint names are in `meta/info.json` (`features.action.names`). A sidecar file, `meta/lerobot_3d.json`, records the depth encoding, camera serials, link names and frame conventions.
+
+`lerobot_3d.recording.dataset_loader` turns a frame back into the live pipeline's `Datapoint`s (BGR color, raw uint16 depth, intrinsics, `X_WC`). Fusion, masking and segmentation code then works on recorded data unchanged:
+
+```python
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
+from lerobot_3d.point_clouds.camera_stream import get_fused_point_cloud
+from lerobot_3d.recording.dataset_loader import frame_link_pcds, frame_to_datapoints
+
+ds = LeRobotDataset("local/my_task", root="path/to/dataset")
+item = ds[0]
+datapoints = frame_to_datapoints(item)            # set dp.obj_mask per camera to segment
+scene_pcd, _ = get_fused_point_cloud(datapoints)  # world-frame fused cloud
+links = frame_link_pcds(item)                     # {link_name: (N, 3)} world frame
+```
+
+To record from your own loop (e.g. with `step(action)`), use `LeRobotDatasetRecorder` directly: `start_episode()`, `add_frame(datapoints, robot_states[0], action)`, `stop_episode()`, then `save_episode()` or `discard_episode()`, and `finalize()` at the end.
+
 ## Performing calibration
 
 <p align="center">
@@ -89,7 +139,7 @@ See `src/teleop_config.yaml` for the full, annotated field list (recording, URDF
 
 **Robot arm motor calibration** (homing/joint limits) is handled by LeRobot itself, not this repo — run `lerobot-calibrate` for each leader/follower arm. Point `teleop_config.yaml`'s `robot_calibration_dir` / `robot_calibration_ids` / `robot_calibration_paths` at the resulting JSON if it isn't in LeRobot's default location.
 
-**Camera intrinsics** are written automatically to `intrinsic_calibration.json` when `lerobot-teleop` shuts down and that file doesn't already exist.
+**Camera intrinsics** are written automatically to `intrinsic_calibration.json` (in the working directory) on every **Capture** and when `lerobot-teleop` shuts down; each connected camera's entry is added or refreshed, and entries for other cameras are kept.
 
 **Camera extrinsics** (each RealSense's pose relative to the robot base) are the main calibration workflow:
 
@@ -102,7 +152,7 @@ See `src/teleop_config.yaml` for the full, annotated field list (recording, URDF
    }
    ```
 2. Run `lerobot-teleop`, position the robot arm in view of the camera(s) you're calibrating, and click **Capture** in the viser GUI. This writes `calibration_files/<serial>/{color.png,depth.npz}` per camera and `calibration_files/robot_pcd.npz` (the robot mesh point cloud at that pose).
-3. **Segment the robot** in each `calibration_files/<serial>/color.png` and save the result as `calibration_files/<serial>/mask.png` in the same directory — `icp.py` reads its **alpha channel** as the mask (opaque = robot, transparent = background) and zeroes out depth outside it before aligning. We use [Segment Anything (web)](https://huggingface.co/spaces/Xenova/segment-anything-web): upload `color.png`, click on the robot to select it, and export/download the cutout as `mask.png` — its default transparent-background export already matches the alpha convention `icp.py` expects. A camera without a `mask.png` is skipped (see `discover_calibration_serials`, which requires both `depth.npz` and `mask.png`).
+3. **Segment the robot** — right after **Capture** saves the images, the follower(s) move back (over ~3 s) to the pose they were in when `lerobot-teleop` started, then an OpenCV window opens for each camera's `color.png`: **left-click** on the robot (positive points), **right-click** on background SAM2 grabbed by mistake (negative points), and watch the green overlay update. **Enter**/**Space** saves `calibration_files/<serial>/mask.png`; **u** undoes the last point, **r** clears them, **s**/**Esc** skips the camera. The teleop loop pauses meanwhile; once you're done, the follower eases (~2 s) from that pose back to the leader instead of jumping. This needs SAM2: `pip install -e ".[segment]"` (the checkpoint, `sam2_model_id` in `teleop_config.yaml`, downloads from Hugging Face on first use); set `segment_on_capture: false` to turn it off. `icp.py` reads the mask's **alpha channel** (opaque = robot, transparent = background) and zeroes out depth outside it. You can still make the mask by hand, e.g. with [Segment Anything (web)](https://huggingface.co/spaces/Xenova/segment-anything-web), whose transparent-background cutout uses the same convention. A camera without a `mask.png` is skipped (see `discover_calibration_serials`, which requires both `depth.npz` and `mask.png`).
 4. From the same directory (containing `calibration_files/`, `extrinsic_calibration.json`, `intrinsic_calibration.json`), run:
    ```bash
    python -m lerobot_3d.icp

@@ -18,6 +18,52 @@ from lerobot_3d.paths import CALIBRATION_DIR
 from lerobot_3d.point_clouds.camera_stream import MultiRealSenseStream, get_fused_point_cloud
 from lerobot_3d.point_clouds.viser_viewer import ViserSceneViewer, grid_offsets
 from lerobot_3d.point_clouds.robot_state import RobotState
+from lerobot_3d.calibration_mask import (
+    SEGMENT_HELP,
+    RobotSegmenter,
+    save_mask_png,
+    segment_interactively,
+)
+
+_HOMING_DURATION_S = 3.0
+"""Seconds to move the followers back to their startup pose before segmenting a capture."""
+_RESUME_DURATION_S = 2.0
+"""Seconds to blend from the home pose back to the teleop target once segmentation is done."""
+
+
+def write_intrinsics(datapoints, path="intrinsic_calibration.json") -> None:
+    """Add/refresh each datapoint's color intrinsics in ``path``, keeping other cameras' entries."""
+    intrinsics = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            intrinsics = json.load(f)
+    for datapoint in datapoints:
+        intr = datapoint.color_intrinsics
+        intrinsics[datapoint.serial] = {
+            'fl_x': intr.fx,
+            'fl_y': intr.fy,
+            'cx': intr.ppx,
+            'cy': intr.ppy,
+            'w': datapoint.color.shape[1],
+            'h': datapoint.color.shape[0],
+        }
+    with open(path, "w") as f:
+        json.dump(intrinsics, f, indent=8)
+
+
+def blend_actions(start_actions, target_actions, alpha):
+    """Per-key linear blend of motor-space action dicts; non-numeric values take the target."""
+    actions = []
+    for start_action, target_action in zip(start_actions, target_actions):
+        out = {}
+        for key, target_value in target_action.items():
+            start_value = start_action.get(key, target_value)
+            if isinstance(start_value, Real) and isinstance(target_value, Real):
+                out[key] = float(start_value) + alpha * (float(target_value) - float(start_value))
+            else:
+                out[key] = target_value
+        actions.append(out)
+    return actions
 
 
 class SystemStateViewer:
@@ -57,6 +103,12 @@ class SystemStateViewer:
         ]
 
         self.recording_name = config.recording_name
+        self.segment_on_capture = config.segment_on_capture
+        self._segmenter = RobotSegmenter(config.sam2_model_id)
+        self._home_actions = None
+        """Follower motor positions at startup; captures home here before segmenting."""
+        self._resume_from = None
+        """``(actions, start_time)`` to blend teleop targets from after homing, else ``None``."""
 
         if self.recording_name != '':
             self.record = True
@@ -70,6 +122,7 @@ class SystemStateViewer:
             for bot in self.followers:
                 bot.connect()
             print("Connected.")
+            self._home_actions = self._read_follower_positions()
             if self.action_interpolation_duration_s > 0:
                 self._start_action_thread()
         else:
@@ -145,7 +198,7 @@ class SystemStateViewer:
             raise ValueError(f"Expected {expected} actions, got {len(actions)}")
 
         if self.followers:
-            self._set_action_targets(actions)
+            self._set_action_targets(self._blend_from_resume(actions))
             with self._follower_io_lock:
                 observations = [self.followers[0].get_observation()]
         else:
@@ -187,6 +240,12 @@ class SystemStateViewer:
                 cv2.imwrite(os.path.join(serial_dir, "color.png"), datapoint.color)
                 np.savez_compressed(os.path.join(serial_dir, "depth.npz"), depth=np.array(datapoint.depth))
             np.savez_compressed(os.path.join(calibration_dir, "robot_pcd.npz"), pcd=np.array(robot_pcd_np))
+            # icp.py needs intrinsics for every captured camera; don't wait for shutdown.
+            write_intrinsics(datapoints)
+
+            if self.segment_on_capture:
+                self._home_followers()
+                self._segment_capture(datapoints, calibration_dir)
 
         if self.record:
             for datapoint in datapoints:
@@ -268,16 +327,7 @@ class SystemStateViewer:
             return None
         duration = self.action_interpolation_duration_s
         alpha = min(1.0, max(0.0, (now - self._target_start_time) / duration))
-        actions = []
-        for start_action, target_action in zip(self._start_actions, self._target_actions):
-            out = {}
-            for key, target_value in target_action.items():
-                start_value = start_action.get(key, target_value)
-                if isinstance(start_value, Real) and isinstance(target_value, Real):
-                    out[key] = float(start_value) + alpha * (float(target_value) - float(start_value))
-                else:
-                    out[key] = target_value
-            actions.append(out)
+        actions = blend_actions(self._start_actions, self._target_actions, alpha)
         self._current_actions = self._copy_actions(actions)
         return actions
 
@@ -315,6 +365,74 @@ class SystemStateViewer:
                 )
             datapoint.obj_mask = mask_np
 
+
+    def _read_follower_positions(self):
+        with self._follower_io_lock:
+            observations = [follower.get_observation() for follower in self.followers]
+        return [
+            {key: float(value) for key, value in obs.items() if key.endswith(".pos")}
+            for obs in observations
+        ]
+
+    def _home_followers(self) -> None:
+        """Blocking move of the followers back to their startup pose, held until resume."""
+        if not self.followers or self._home_actions is None:
+            return
+        print("[capture] Homing followers to their startup pose...")
+        start = self._read_follower_positions()
+        # Pause the interpolation thread so it doesn't fight the homing move.
+        with self._action_lock:
+            self._target_actions = None
+        period_s = 1.0 / self.action_command_hz
+        t0 = time.monotonic()
+        while True:
+            alpha = min(1.0, (time.monotonic() - t0) / _HOMING_DURATION_S)
+            self._send_actions(blend_actions(start, self._home_actions, alpha))
+            if alpha >= 1.0:
+                break
+            time.sleep(period_s)
+        with self._action_lock:
+            if self._current_actions is not None:
+                # Interpolation thread resumes by holding the home pose.
+                self._current_actions = self._copy_actions(self._home_actions)
+                self._start_actions = self._copy_actions(self._home_actions)
+                self._target_actions = self._copy_actions(self._home_actions)
+        self._resume_from = (self._copy_actions(self._home_actions), None)
+
+    def _blend_from_resume(self, actions):
+        """After homing, ease teleop targets from the home pose instead of jumping to them."""
+        if self._resume_from is None:
+            return actions
+        start, t0 = self._resume_from
+        now = time.monotonic()
+        if t0 is None:
+            # Clock starts on the first teleop tick after segmentation, not when homing ended.
+            t0 = now
+            self._resume_from = (start, t0)
+        alpha = min(1.0, (now - t0) / _RESUME_DURATION_S)
+        if alpha >= 1.0:
+            self._resume_from = None
+            return actions
+        return blend_actions(start, actions, alpha)
+
+    def _segment_capture(self, datapoints, calibration_dir: str) -> None:
+        # Blocks the teleop loop on purpose: the robot has to hold the captured pose anyway
+        # (robot_pcd.npz), and followers keep their last commanded target meanwhile.
+        print(f"[capture] Segment the robot in each camera's window. {SEGMENT_HELP}")
+        for datapoint in datapoints:
+            try:
+                mask = segment_interactively(
+                    self._segmenter, datapoint.color, f"Segment robot - {datapoint.serial}"
+                )
+            except ImportError as e:
+                print(f"[capture] {e} Skipping mask.png for all cameras.")
+                return
+            mask_path = os.path.join(calibration_dir, datapoint.serial, "mask.png")
+            if mask is None:
+                print(f"[capture] Skipped {datapoint.serial}: no mask.png, so icp.py will skip it.")
+                continue
+            save_mask_png(mask_path, datapoint.color, mask)
+            print(f"[capture] Wrote {mask_path}")
 
     def _save_scene_pcd_subgoal(self, scene_pcd: o3d.geometry.PointCloud) -> None:
         subgoals_dir = "subgoals"
@@ -370,24 +488,8 @@ class SystemStateViewer:
                 np.savez_compressed(os.path.join(serial_dir, "depth.npz"), depth=np.array(frames_depth))
             np.savez_compressed(os.path.join(recording_dir, "robot_pcd.npz"), pcd=np.array(self.robot_pcds))
 
-        if self.stream is not None and not os.path.exists("intrinsic_calibration.json"):
-            datapoints = self.stream.get_datapoints()
-
-            intrinsics = {}
-            for datapoint in datapoints:
-
-                intr = datapoint.color_intrinsics
-
-                intrinsics[datapoint.serial] = {}
-                intrinsics[datapoint.serial]['fl_x'] = intr.fx
-                intrinsics[datapoint.serial]['fl_y'] = intr.fy
-                intrinsics[datapoint.serial]['cx'] = intr.ppx
-                intrinsics[datapoint.serial]['cy'] = intr.ppy
-                intrinsics[datapoint.serial]['w'] = datapoint.color.shape[1]
-                intrinsics[datapoint.serial]['h'] = datapoint.color.shape[0]
-
-            with open("intrinsic_calibration.json", "w") as f:
-                json.dump(intrinsics, f, indent=8)
+        if self.stream is not None:
+            write_intrinsics(self.stream.get_datapoints())
 
         self.viewer.close()
 

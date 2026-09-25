@@ -62,6 +62,8 @@ class ViserSceneViewer:
         self.quit = False
         self.capture = False
         self.save_subgoal = False
+        self._status_handle = None
+        self._status_text = None
 
         if controls:
             self._add_controls()
@@ -82,6 +84,17 @@ class ViserSceneViewer:
         @save_subgoal_button.on_click
         def _on_save_subgoal(_) -> None:
             self.save_subgoal = True
+
+    def set_status(self, text: str) -> None:
+        """Show ``text`` in the GUI sidebar (e.g. the episode recording timer)."""
+        if text == self._status_text:
+            return
+        self._status_text = text
+        content = f"**{text}**"
+        if self._status_handle is None:
+            self._status_handle = self.server.gui.add_markdown(content)
+        else:
+            self._status_handle.content = content
 
     def _upsert_point_cloud(self, handle, name: str, points: np.ndarray, colors: np.ndarray | None):
         points = np.asarray(points, dtype=np.float32)

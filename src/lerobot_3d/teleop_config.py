@@ -137,6 +137,21 @@ class TeleopSystemConfig:
     """Virtual robots driven by ``step(actions)``; ``> 1`` only with no leaders and no followers."""
     robot_grid_spacing: float = 0.5
     """Meters between neighboring robot bases in the viser grid (display only)."""
+    dataset_repo_id: str = ""
+    """Non-empty → record teleop episodes into this ``LeRobotDataset`` (e.g. ``local/my_task``).
+    Enter starts an episode, Space ends it, then y/n keeps or discards it."""
+    dataset_root: str | None = None
+    """Dataset directory; ``None`` → LeRobot's default ``HF_LEROBOT_HOME/<dataset_repo_id>``.
+    An existing dataset there is appended to."""
+    dataset_task: str = "teleop"
+    """Task string stored with every recorded frame."""
+    dataset_fps: int = 15
+    """Recording rate; the teleop loop runs at this rate while a dataset is configured."""
+    segment_on_capture: bool = True
+    """After viser **Capture**, open each camera's image to click-segment the robot with SAM2
+    and write ``calibration_files/<serial>/mask.png`` (needs the ``segment`` extra)."""
+    sam2_model_id: str = "facebook/sam2.1-hiera-large"
+    """Hugging Face SAM2 checkpoint used for click-to-segment."""
     calibration_robot_type: str = dataclasses.field(default="so101_follower", init=False)
     """LeRobot device type whose calibration poses the URDF: ``"so101_leader"`` when there are
     no followers and ``robot_calibration_ids`` was defaulted from a leader. Derived, not set."""
@@ -157,6 +172,10 @@ class TeleopSystemConfig:
             raise ValueError("num_robots must be >= 1.")
         if self.robot_grid_spacing <= 0:
             raise ValueError("robot_grid_spacing must be positive.")
+        if self.dataset_fps <= 0:
+            raise ValueError("dataset_fps must be positive.")
+        if self.dataset_repo_id and self.num_robots > 1:
+            raise ValueError("Dataset recording supports a single robot (num_robots must be 1).")
         if self.robot_calibration_ids is None:
             if self.followers:
                 ids = tuple(f.id for f in self.followers)

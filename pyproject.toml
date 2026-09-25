@@ -42,6 +42,7 @@ dependencies = [
 [project.optional-dependencies]
 realsense = ["pyrealsense2"]
 orbbec = ["pyorbbecsdk2"]
+segment = ["sam2>=1.1", "torch"]
 test = ["pytest>=7.4", "pytest-cov>=4.1"]
 
 [project.urls]

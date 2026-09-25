@@ -249,6 +249,53 @@ def test_non_positive_robot_grid_spacing_raises():
         _virtual_config(robot_grid_spacing=0.0)
 
 
+def test_dataset_recording_disabled_by_default():
+    config = _minimal_config()
+
+    assert config.dataset_repo_id == ""
+    assert config.dataset_fps == 15
+
+
+def test_non_positive_dataset_fps_raises():
+    with pytest.raises(ValueError, match="dataset_fps"):
+        _minimal_config(dataset_fps=0)
+
+
+def test_dataset_recording_with_multiple_robots_raises():
+    with pytest.raises(ValueError, match="single robot"):
+        _virtual_config(num_robots=2, dataset_repo_id="local/x")
+
+
+def test_load_teleop_system_config_dataset_fields(teleop_config_yaml_factory):
+    path = teleop_config_yaml_factory(
+        {"dataset_repo_id": "local/x", "dataset_root": "/tmp/ds", "dataset_task": "push"}
+    )
+
+    config = load_teleop_system_config(str(path))
+
+    assert config.dataset_repo_id == "local/x"
+    assert config.dataset_root == "/tmp/ds"
+    assert config.dataset_task == "push"
+
+
+def test_segment_on_capture_defaults():
+    config = _minimal_config()
+
+    assert config.segment_on_capture is True
+    assert config.sam2_model_id == "facebook/sam2.1-hiera-large"
+
+
+def test_load_teleop_system_config_segment_fields(teleop_config_yaml_factory):
+    path = teleop_config_yaml_factory(
+        {"segment_on_capture": False, "sam2_model_id": "facebook/sam2.1-hiera-tiny"}
+    )
+
+    config = load_teleop_system_config(str(path))
+
+    assert config.segment_on_capture is False
+    assert config.sam2_model_id == "facebook/sam2.1-hiera-tiny"
+
+
 def test_explicit_robot_calibration_ids_preserved():
     config = _minimal_config(robot_calibration_ids=["custom_id"])
 

@@ -19,6 +19,7 @@ followers:
 
 realsense_serials:
   - "044322073544"
+  - "244622072067"
 
 # Virtual robots (only > 1 with leaders: [] and followers: []), and the grid spacing in
 # meters between their bases in viser. robot_calibration_ids takes 1 id (shared) or N.
@@ -29,13 +30,27 @@ robot_grid_spacing: 0.5
 extrinsic_json: extrinsic_calibration.json
 
 # Non-empty -> write recordings/<name>/ on shutdown.
-recording_name: ""
+recording_name: "pusht"
+
+# Non-empty -> record episodes into a LeRobotDataset (e.g. local/my_task). In the terminal:
+# Enter starts an episode, Space ends it, then y/n keeps or discards it. dataset_root: null
+# uses LeRobot's default location (HF_LEROBOT_HOME/<repo_id>); an existing dataset there is
+# appended to. The teleop loop runs at dataset_fps while recording is configured.
+dataset_repo_id: "Sorozco0612/pusht"
+dataset_root: null
+dataset_task: teleop
+dataset_fps: 15
 
 # null -> bundled so101_new_calib.urdf under the package's calibration/ dir.
 urdf_path: null
 
 # Show the viser GUI's Quit/Capture/Save-subgoal controls.
 tune: true
+
+# After Capture, click-segment the robot per camera with SAM2 (left-click robot, right-click
+# background, Enter to save) -> calibration_files/<serial>/mask.png. Needs the segment extra.
+segment_on_capture: true
+sam2_model_id: facebook/sam2.1-hiera-large
 
 # Viser point radius in world-space meters (not pixels) -- e.g. 0.003 = 3mm dots.
 point_size: 0.003

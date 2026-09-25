@@ -1,18 +1,29 @@
 # Full TeleopSystemConfig, as YAML. Edit this file to change hardware wiring or run
 # settings -- no code changes needed. See lerobot_3d.teleop_config for field docs.
 
-# leaders/followers must be the same length (one leader drives one follower,
-# matched by list position). realsense_serials needs at least one entry.
+# leaders/followers must be the same length when both are set (one leader drives one
+# follower, matched by list position). Each of the three lists below may be empty ([]):
+#   leaders: []            -> no teleop; drive the system with system.step(action).
+#   followers: []          -> nothing is commanded; the action poses the URDF in viser.
+#                             Calibration: robot_calibration_ids/paths, else the first leader's.
+#   realsense_serials: []  -> no cameras; the scene point cloud is empty.
+# With no leaders AND no followers, num_robots virtual robots are each posed by their own
+# entry in system.step([a0, ..., aN-1]) and drawn on a grid in viser.
 leaders:
-  - port: /dev/ttyACM0
-    id: bender_leader_arm
+  - port: /dev/ttyACM1
+    id: test_leader_arm
 
 followers:
-  - port: /dev/ttyACM2
+  - port: /dev/ttyACM0
     id: gray_follower_arm
 
 realsense_serials:
   - "044322073544"
+
+# Virtual robots (only > 1 with leaders: [] and followers: []), and the grid spacing in
+# meters between their bases in viser. robot_calibration_ids takes 1 id (shared) or N.
+num_robots: 1
+robot_grid_spacing: 0.5
 
 # Camera extrinsics JSON (cwd, LEROBOT_3D_EXTRINSIC_JSON, or src/ next to package).
 extrinsic_json: extrinsic_calibration.json

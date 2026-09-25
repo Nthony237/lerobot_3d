@@ -11,6 +11,7 @@ from lerobot.utils.constants import HF_LEROBOT_CALIBRATION, ROBOTS
 from scipy.spatial.transform import Rotation
 from urchin import URDF
 
+from lerobot_3d.common.types import RobotSnapshot
 from lerobot_3d.paths import CALIBRATION_DIR
 
 
@@ -21,6 +22,7 @@ class RobotState:
         id,
         *,
         robot_type: str = "so101_follower",
+        calibration_category: str = ROBOTS,
         calibration_dir: str | Path | None = None,
         calibration_path: str | Path | None = None,
     ):
@@ -29,6 +31,7 @@ class RobotState:
         robot_calibration_path = self._resolve_calibration_path(
             id,
             robot_type=robot_type,
+            calibration_category=calibration_category,
             calibration_dir=calibration_dir,
             calibration_path=calibration_path,
         )
@@ -49,6 +52,7 @@ class RobotState:
         id: str,
         *,
         robot_type: str,
+        calibration_category: str,
         calibration_dir: str | Path | None,
         calibration_path: str | Path | None,
     ) -> Path:
@@ -58,14 +62,15 @@ class RobotState:
             root = (
                 Path(calibration_dir).expanduser()
                 if calibration_dir is not None
-                else HF_LEROBOT_CALIBRATION / ROBOTS / robot_type
+                else HF_LEROBOT_CALIBRATION / calibration_category / robot_type
             )
             path = root / f"{id}.json"
 
         if not path.is_file():
             raise FileNotFoundError(
                 f"Robot calibration file not found for id '{id}': {path}. "
-                "Pass TeleopSystemConfig.robot_calibration_dir / robot_calibration_paths, "
+                "Pass TeleopSystemConfig.robot_calibration_dir / robot_calibration_paths "
+                "(with no followers, the first leader's calibration is used by default), "
                 "or set HF_LEROBOT_CALIBRATION so LeRobot and lerobot_3d use the same files."
             )
         return path
@@ -228,6 +233,26 @@ class RobotState:
         robot_pcd, robot_link_pcds = self.sample_robot_points(fk_poses)
         link_poses = self.get_link_poses(fk_poses)
         return robot_pcd, robot_link_pcds, link_poses
+
+    def get_robot_snapshot(self, obs, index=0, base_offset=None):
+        """FK ``obs`` once and bundle everything about this robot into a :class:`RobotSnapshot`
+        (base frame; ``base_offset`` is only carried along for display)."""
+        joint_radians = self.convert_lerobot_action_to_radians(obs)
+        fk_poses = self.robot_urdf.link_fk(cfg=joint_radians)
+        robot_pcd, robot_link_pcds = self.sample_robot_points(fk_poses)
+        return RobotSnapshot(
+            index=index,
+            joint_positions=dict(obs),
+            joint_radians=joint_radians,
+            pcd=robot_pcd,
+            link_pcds=robot_link_pcds,
+            link_poses=self.get_link_poses(fk_poses),
+            base_offset=(
+                np.zeros(3, dtype=np.float64)
+                if base_offset is None
+                else np.asarray(base_offset, dtype=np.float64)
+            ),
+        )
 
     def radians_to_motor_action(self, joint_positions):
         """Inverse of :meth:`convert_lerobot_action_to_radians`: this robot's own

@@ -11,8 +11,9 @@ pytest.importorskip("lerobot")
 pytest.importorskip("viser")
 pytest.importorskip("pyrealsense2")
 
-from lerobot_3d.common.types import Datapoint
+from lerobot_3d.common.types import Datapoint, RobotSnapshot
 from lerobot_3d.point_clouds.system_vis import SystemStateViewer
+from lerobot_3d.point_clouds.viser_viewer import grid_offsets
 
 pytestmark = pytest.mark.hardware_stack
 
@@ -197,3 +198,99 @@ def test_apply_masks_shape_mismatch_raises():
 
     with pytest.raises(ValueError, match="expected"):
         viewer._apply_masks(datapoints, [np.ones((2, 2))])
+
+
+# ---------------------------------------------------------------------------
+# update() with no followers / no cameras
+# ---------------------------------------------------------------------------
+
+
+class _FakeViewer:
+    quit = False
+    capture = False
+    save_subgoal = False
+
+    def __init__(self):
+        self.updates = []
+
+    def update(self, *args):
+        self.updates.append(args)
+
+
+class _FakeRobotState:
+    """Stands in for RobotState: every robot gets the same base-frame geometry."""
+
+    def __init__(self):
+        self.observations = []
+
+    def get_robot_snapshot(self, obs, index=0, base_offset=None):
+        self.observations.append(obs)
+        return RobotSnapshot(
+            index=index,
+            joint_positions=dict(obs),
+            joint_radians={},
+            pcd=np.zeros((3, 3)),
+            link_pcds={"base": np.zeros((1, 3))},
+            link_poses={},
+            base_offset=np.asarray(base_offset),
+        )
+
+
+def _virtual_robots_viewer(num_robots=1) -> SystemStateViewer:
+    viewer = _bare_viewer()
+    viewer.viewer = _FakeViewer()
+    viewer.robot_states = [_FakeRobotState() for _ in range(num_robots)]
+    viewer.num_robots = num_robots
+    viewer.base_offsets = grid_offsets(num_robots, spacing=0.5)
+    viewer.followers = []
+    viewer.stream = None
+    viewer.record = False
+    viewer.quit = False
+    return viewer
+
+
+def test_update_without_followers_poses_urdf_from_action():
+    viewer = _virtual_robots_viewer()
+    action = {"shoulder_pan.pos": 12.0}
+
+    datapoints, scene_pcd, robot_pcds, robot_link_pcds, snapshots = viewer.update(action)
+
+    assert viewer.robot_states[0].observations == [action]
+    assert datapoints == []
+    assert len(scene_pcd.points) == 0
+    assert len(robot_pcds) == 1
+    assert robot_pcds[0].shape == (3, 3)
+    assert len(viewer.viewer.updates) == 1
+
+
+def test_update_without_followers_requires_one_action_per_robot():
+    viewer = _virtual_robots_viewer(num_robots=1)
+
+    with pytest.raises(ValueError, match="Expected 1 actions"):
+        viewer.update({"a.pos": 0.0}, {"a.pos": 1.0})
+
+
+def test_update_multiple_virtual_robots_returns_one_snapshot_each():
+    viewer = _virtual_robots_viewer(num_robots=3)
+    actions = [{"a.pos": float(i)} for i in range(3)]
+
+    _, _, robot_pcds, robot_link_pcds, snapshots = viewer.update(*actions)
+
+    assert [s.index for s in snapshots] == [0, 1, 2]
+    assert [s.joint_positions for s in snapshots] == actions
+    assert [tuple(s.base_offset) for s in snapshots] == [
+        (0.0, 0.0, 0.0),
+        (0.5, 0.0, 0.0),
+        (0.0, 0.5, 0.0),
+    ]
+    # Returned clouds are in each robot's base frame -- the grid offset is display-only.
+    assert all(np.array_equal(pcd, np.zeros((3, 3))) for pcd in robot_pcds)
+    assert len(robot_link_pcds) == 3
+    assert viewer.viewer.updates[0][2] == snapshots
+
+
+def test_update_multiple_virtual_robots_wrong_action_count_raises():
+    viewer = _virtual_robots_viewer(num_robots=3)
+
+    with pytest.raises(ValueError, match="Expected 3 actions"):
+        viewer.update({"a.pos": 0.0})

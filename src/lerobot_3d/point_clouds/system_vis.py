@@ -12,10 +12,11 @@ import imageio
 import cv2
 
 from lerobot.robots.so101_follower import SO101FollowerConfig, SO101Follower
+from lerobot.utils.constants import ROBOTS, TELEOPERATORS
 from lerobot_3d.teleop_config import TeleopSystemConfig
 from lerobot_3d.paths import CALIBRATION_DIR
 from lerobot_3d.point_clouds.camera_stream import MultiRealSenseStream, get_fused_point_cloud
-from lerobot_3d.point_clouds.viser_viewer import ViserSceneViewer
+from lerobot_3d.point_clouds.viser_viewer import ViserSceneViewer, grid_offsets
 from lerobot_3d.point_clouds.robot_state import RobotState
 
 
@@ -39,12 +40,17 @@ class SystemStateViewer:
         )
 
         serials = list(config.realsense_serials)
-        self.stream = MultiRealSenseStream(
-            serials,
-            config.extrinsic_json,
-            width=config.camera_width,
-            height=config.camera_height,
-            fps=config.camera_fps,
+        # No cameras -> no stream (and no extrinsics file needed); the scene cloud stays empty.
+        self.stream = (
+            MultiRealSenseStream(
+                serials,
+                config.extrinsic_json,
+                width=config.camera_width,
+                height=config.camera_height,
+                fps=config.camera_fps,
+            )
+            if serials
+            else None
         )
         self.followers = [
             SO101Follower(SO101FollowerConfig(port=ax.port, id=ax.id)) for ax in config.followers
@@ -59,27 +65,52 @@ class SystemStateViewer:
 
         self.quit=False
 
-        print("Connecting robots...")
-        for bot in self.followers:
-            bot.connect()
-        print("Connected.")
-        if self.action_interpolation_duration_s > 0:
-            self._start_action_thread()
+        if self.followers:
+            print("Connecting robots...")
+            for bot in self.followers:
+                bot.connect()
+            print("Connected.")
+            if self.action_interpolation_duration_s > 0:
+                self._start_action_thread()
+        else:
+            print("No followers configured; actions only pose the URDF in viser.")
 
         urdf = config.urdf_path or str(CALIBRATION_DIR / "so101_new_calib.urdf")
-        # FK / mesh visualization uses the first follower's observation and its calibration id.
-        calibration_path = (
-            config.robot_calibration_paths[0]
-            if config.robot_calibration_paths is not None
-            else None
-        )
-        self.robot_state = RobotState(
-            urdf,
-            config.robot_calibration_ids[0],
-            calibration_dir=config.robot_calibration_dir,
-            calibration_path=calibration_path,
-        )
-        self.viewer.load_static_meshes(self.robot_state.get_static_meshes())
+        # With followers, FK / mesh visualization uses the first follower's observation and its
+        # calibration id. With no followers, num_robots virtual robots are each posed by their
+        # own commanded action and drawn on a grid.
+        self.num_robots = 1 if self.followers else config.num_robots
+        self.base_offsets = grid_offsets(self.num_robots, config.robot_grid_spacing)
+        # Robots sharing a calibration share one RobotState (URDF meshes are loaded once).
+        states_by_calibration: dict[tuple, RobotState] = {}
+        self.robot_states: list[RobotState] = []
+        for i in range(self.num_robots):
+            calibration_id = config.robot_calibration_ids[i]
+            calibration_path = (
+                config.robot_calibration_paths[i]
+                if config.robot_calibration_paths is not None
+                else None
+            )
+            key = (calibration_id, calibration_path)
+            if key not in states_by_calibration:
+                states_by_calibration[key] = RobotState(
+                    urdf,
+                    calibration_id,
+                    robot_type=config.calibration_robot_type,
+                    calibration_category=(
+                        TELEOPERATORS
+                        if config.calibration_robot_type == "so101_leader"
+                        else ROBOTS
+                    ),
+                    calibration_dir=config.robot_calibration_dir,
+                    calibration_path=calibration_path,
+                )
+            robot_state = states_by_calibration[key]
+            self.robot_states.append(robot_state)
+            self.viewer.load_static_meshes(
+                robot_state.get_static_meshes(), robot_index=i, base_offset=self.base_offsets[i]
+            )
+        self.robot_state = self.robot_states[0]
 
         self.serials = serials
         self.images = {}
@@ -91,7 +122,9 @@ class SystemStateViewer:
             self.depths[serial] = []
 
     def update(self, *actions, masks_by_serial=None):
-        # actions are simply joint states
+        # actions are simply joint states: one per follower, or one per virtual robot
+        # (num_robots) with no followers -- those pose the URDFs directly instead of being
+        # sent to hardware.
         #
         # masks_by_serial can be either a mapping {serial: mask} or a sequence
         # aligned with self.serials/datapoints. Nonzero/True mask pixels are kept.
@@ -99,26 +132,36 @@ class SystemStateViewer:
         # Returns:
         #     datapoints: raw per-camera datapoints used to build the fused point cloud.
         #     scene_pcd: Open3D point cloud with fused scene points and colors.
-        #     robot_pcd: ``(M, 3)`` float64 world points for the sampled follower mesh.
-        #     robot_link_pcds: per-link robot point clouds keyed by URDF link name.
+        #     robot_pcds: per robot, ``(M, 3)`` float64 sampled mesh points (robot base frame).
+        #     robot_link_pcds: per robot, point clouds keyed by URDF link name (base frame).
+        #     robot_snapshots: per robot, a RobotSnapshot (joint state, clouds, link poses,
+        #         grid base_offset).
 
         if self.viewer.quit:
             self.quit = True
 
-        if len(actions) != len(self.followers):
-            raise ValueError(
-                f"Expected {len(self.followers)} leader actions, got {len(actions)}"
-            )
-        self._set_action_targets(actions)
+        expected = len(self.followers) if self.followers else self.num_robots
+        if len(actions) != expected:
+            raise ValueError(f"Expected {expected} actions, got {len(actions)}")
 
-        with self._follower_io_lock:
-            obs = self.followers[0].get_observation()
+        if self.followers:
+            self._set_action_targets(actions)
+            with self._follower_io_lock:
+                observations = [self.followers[0].get_observation()]
+        else:
+            observations = [dict(action) for action in actions]
 
-        robot_pcd_np, robot_link_pcds, link_poses = self.robot_state.get_robot_state(obs)
-        datapoints = self.stream.get_datapoints()
+        snapshots = [
+            robot_state.get_robot_snapshot(obs, index=i, base_offset=self.base_offsets[i])
+            for i, (robot_state, obs) in enumerate(zip(self.robot_states, observations))
+        ]
+        # Robot 0 sits at the world origin, so its base-frame cloud is also world frame --
+        # capture/recording keep using it exactly as before.
+        robot_pcd_np = snapshots[0].pcd
+        datapoints = self.stream.get_datapoints() if self.stream is not None else []
 
         for datapoint in datapoints:
-            datapoint.joint_positions = obs
+            datapoint.joint_positions = observations[0]
 
         if self.viewer.capture:
             self.viewer.capture = False
@@ -160,19 +203,21 @@ class SystemStateViewer:
            self._save_scene_pcd_subgoal(scene_pcd)
 
         scene_pcd_np = np.asarray(scene_pcd.points, dtype=np.float64)
-        robot_pcd_np = np.asarray(robot_pcd_np, dtype=np.float64)
 
         scene_colors = (
             np.asarray(scene_pcd.colors, dtype=np.float64)
             if scene_pcd.has_colors()
             else None
         )
-        robot_colors = np.tile(np.array([[1.0, 0.1, 0.1]], dtype=np.float64), (robot_pcd_np.shape[0], 1))
-        self.viewer.update(
-            scene_pcd_np, scene_colors, robot_pcd_np, robot_colors, robot_link_pcds, link_poses
-        )
+        self.viewer.update(scene_pcd_np, scene_colors, snapshots)
 
-        return datapoints, scene_pcd, robot_pcd_np, robot_link_pcds
+        return (
+            datapoints,
+            scene_pcd,
+            [snapshot.pcd for snapshot in snapshots],
+            [snapshot.link_pcds for snapshot in snapshots],
+            snapshots,
+        )
 
 
     def _start_action_thread(self) -> None:
@@ -325,7 +370,7 @@ class SystemStateViewer:
                 np.savez_compressed(os.path.join(serial_dir, "depth.npz"), depth=np.array(frames_depth))
             np.savez_compressed(os.path.join(recording_dir, "robot_pcd.npz"), pcd=np.array(self.robot_pcds))
 
-        if not os.path.exists("intrinsic_calibration.json"):
+        if self.stream is not None and not os.path.exists("intrinsic_calibration.json"):
             datapoints = self.stream.get_datapoints()
 
             intrinsics = {}
@@ -346,4 +391,5 @@ class SystemStateViewer:
 
         self.viewer.close()
 
-        self.stream.stop()
+        if self.stream is not None:
+            self.stream.stop()

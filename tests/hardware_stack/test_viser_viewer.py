@@ -6,7 +6,7 @@ import pytest
 
 pytest.importorskip("viser")
 
-from lerobot_3d.point_clouds.viser_viewer import _as_viser_colors
+from lerobot_3d.point_clouds.viser_viewer import _as_viser_colors, grid_offsets
 
 pytestmark = pytest.mark.hardware_stack
 
@@ -47,3 +47,29 @@ def test_out_of_range_float_colors_are_clipped():
 
     assert colors[0, 0] == 0
     assert colors[0, 1] == 255
+
+
+def test_grid_offsets_single_robot_at_origin():
+    offsets = grid_offsets(1, spacing=0.5)
+
+    assert len(offsets) == 1
+    assert np.array_equal(offsets[0], [0.0, 0.0, 0.0])
+
+
+def test_grid_offsets_four_robots_form_2x2():
+    offsets = grid_offsets(4, spacing=0.5)
+
+    assert [tuple(o) for o in offsets] == [
+        (0.0, 0.0, 0.0),
+        (0.5, 0.0, 0.0),
+        (0.0, 0.5, 0.0),
+        (0.5, 0.5, 0.0),
+    ]
+
+
+def test_grid_offsets_five_robots_use_three_columns():
+    offsets = grid_offsets(5, spacing=1.0)
+
+    assert np.array_equal(offsets[0], [0.0, 0.0, 0.0])
+    assert np.array_equal(offsets[2], [2.0, 0.0, 0.0])
+    assert np.array_equal(offsets[3], [0.0, 1.0, 0.0])

@@ -5,8 +5,30 @@ used by ``SystemStateViewer``.
 """
 from __future__ import annotations
 
+import math
+from typing import TYPE_CHECKING
+
 import numpy as np
 import viser
+
+if TYPE_CHECKING:
+    from lerobot_3d.common.types import RobotSnapshot
+
+ROBOT_PCD_COLOR = (1.0, 0.1, 0.1)
+"""Float RGB used for every robot's sampled mesh point cloud."""
+
+
+def grid_offsets(n: int, spacing: float) -> list[np.ndarray]:
+    """World-frame base positions for ``n`` robots on a near-square grid ``spacing`` apart.
+
+    Robot 0 sits at the origin (so a camera scene calibrated to it still lines up); the rest
+    fill ``ceil(sqrt(n))`` columns along +x, then rows along +y.
+    """
+    cols = max(1, math.ceil(math.sqrt(n)))
+    return [
+        np.array([(i % cols) * spacing, (i // cols) * spacing, 0.0], dtype=np.float64)
+        for i in range(n)
+    ]
 
 
 def _as_viser_colors(points: np.ndarray, colors: np.ndarray | None) -> np.ndarray:
@@ -32,9 +54,10 @@ class ViserSceneViewer:
 
         self.point_size = point_size
         self._scene_handle = None
-        self._robot_handle = None
-        self._link_handles: dict[str, object] = {}
-        self._link_frames: dict[str, object] = {}
+        self._robot_frames: dict[int, object] = {}
+        self._robot_handles: dict[int, object] = {}
+        self._link_handles: dict[tuple[int, str], object] = {}
+        self._link_frames: dict[tuple[int, str], object] = {}
 
         self.quit = False
         self.capture = False
@@ -75,32 +98,63 @@ class ViserSceneViewer:
         handle.colors = colors
         return handle
 
-    def load_static_meshes(self, meshes: list[tuple[str, str, np.ndarray, np.ndarray]]) -> None:
-        """Mount each URDF visual mesh once, in its local rest pose.
+    def _robot_root(self, robot_index: int) -> str:
+        return f"/robots/robot_{robot_index}"
 
-        Call this once at startup (see ``RobotState.get_static_meshes``). Each mesh is
-        added as a child of a per-link frame node; animating the robot afterwards only
-        needs :func:`update_link_poses`, not re-uploading vertex data every frame --
-        these meshes are tens of thousands of vertices each, so resending them per
-        frame (instead of just moving a frame) was the dominant per-frame cost.
+    def _ensure_robot_frame(self, robot_index: int, base_offset=None) -> None:
+        """Parent frame for one robot, placed at its grid offset. Everything under it (link
+        frames, point clouds) is sent in that robot's base frame."""
+        if robot_index in self._robot_frames:
+            return
+        position = np.zeros(3) if base_offset is None else np.asarray(base_offset)
+        self._robot_frames[robot_index] = self.server.scene.add_frame(
+            self._robot_root(robot_index),
+            position=tuple(float(v) for v in position),
+            axes_length=0.0,
+            show_axes=False,
+        )
+
+    def load_static_meshes(
+        self,
+        meshes: list[tuple[str, str, np.ndarray, np.ndarray]],
+        robot_index: int = 0,
+        base_offset: np.ndarray | None = None,
+    ) -> None:
+        """Mount each URDF visual mesh once, in its local rest pose, for one robot.
+
+        Call this once per robot at startup (see ``RobotState.get_static_meshes``). Each
+        mesh is added as a child of a per-link frame node under the robot's grid frame;
+        animating the robot afterwards only needs :func:`update_link_poses`, not
+        re-uploading vertex data every frame -- these meshes are tens of thousands of
+        vertices each, so resending them per frame (instead of just moving a frame) was
+        the dominant per-frame cost.
         """
+        self._ensure_robot_frame(robot_index, base_offset)
+        root = self._robot_root(robot_index)
         for link_name, mesh_name, vertices, faces in meshes:
-            if link_name not in self._link_frames:
-                self._link_frames[link_name] = self.server.scene.add_frame(
-                    f"/robot_urdf/{link_name}", axes_length=0.0, show_axes=False
+            key = (robot_index, link_name)
+            if key not in self._link_frames:
+                self._link_frames[key] = self.server.scene.add_frame(
+                    f"{root}/urdf/{link_name}", axes_length=0.0, show_axes=False
                 )
             self.server.scene.add_mesh_simple(
-                name=f"/robot_urdf/{link_name}/{mesh_name}",
+                name=f"{root}/urdf/{link_name}/{mesh_name}",
                 vertices=np.asarray(vertices, dtype=np.float32),
                 faces=np.asarray(faces, dtype=np.uint32),
                 color=(200, 200, 200),
                 flat_shading=True,
             )
 
-    def update_link_poses(self, link_poses: dict[str, tuple[np.ndarray, np.ndarray]] | None) -> None:
-        """Move each link's mesh rigidly by updating its frame's pose (cheap: 7 floats/link)."""
+    def update_link_poses(
+        self,
+        link_poses: dict[str, tuple[np.ndarray, np.ndarray]] | None,
+        robot_index: int = 0,
+    ) -> None:
+        """Move each link's mesh rigidly by updating its frame's pose (cheap: 7 floats/link).
+
+        Poses are in the robot's base frame; its grid frame supplies the offset."""
         for link_name, (translation, quat_wxyz) in (link_poses or {}).items():
-            frame = self._link_frames.get(link_name)
+            frame = self._link_frames.get((robot_index, link_name))
             if frame is None:
                 continue
             frame.position = np.asarray(translation, dtype=np.float32)
@@ -110,23 +164,27 @@ class ViserSceneViewer:
         self,
         scene_points: np.ndarray,
         scene_colors: np.ndarray | None,
-        robot_points: np.ndarray,
-        robot_colors: np.ndarray | None,
-        link_pcds: dict[str, np.ndarray] | None = None,
-        link_poses: dict[str, tuple[np.ndarray, np.ndarray]] | None = None,
+        robots: list[RobotSnapshot],
     ) -> None:
-        """Push one frame's scene/robot/per-link point clouds and robot pose to viser."""
+        """Push one frame: the world-frame scene cloud plus each robot's clouds and pose."""
         self._scene_handle = self._upsert_point_cloud(
             self._scene_handle, "/scene_pcd", scene_points, scene_colors
         )
-        self._robot_handle = self._upsert_point_cloud(
-            self._robot_handle, "/robot_pcd", robot_points, robot_colors
-        )
-        for link_name, pts in (link_pcds or {}).items():
-            self._link_handles[link_name] = self._upsert_point_cloud(
-                self._link_handles.get(link_name), f"/robot_links/{link_name}", pts, None
+        for robot in robots:
+            i = robot.index
+            self._ensure_robot_frame(i, robot.base_offset)
+            root = self._robot_root(i)
+            robot_points = np.asarray(robot.pcd, dtype=np.float64)
+            robot_colors = np.tile(np.array([ROBOT_PCD_COLOR]), (robot_points.shape[0], 1))
+            self._robot_handles[i] = self._upsert_point_cloud(
+                self._robot_handles.get(i), f"{root}/pcd", robot_points, robot_colors
             )
-        self.update_link_poses(link_poses)
+            for link_name, pts in robot.link_pcds.items():
+                key = (i, link_name)
+                self._link_handles[key] = self._upsert_point_cloud(
+                    self._link_handles.get(key), f"{root}/links/{link_name}", pts, None
+                )
+            self.update_link_poses(robot.link_poses, robot_index=i)
 
     def close(self) -> None:
         self.server.stop()

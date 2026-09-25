@@ -58,10 +58,22 @@ def test_validate_axis_sets_all_valid_raises_nothing():
     )
 
 
-def test_validate_axis_sets_zero_leaders():
-    with pytest.raises(ValueError, match="at least one leader"):
+def test_validate_axis_sets_zero_leaders_is_valid():
+    _validate_axis_sets(
+        leaders=(), followers=("f1",), realsense_serials=("s1",), robot_calibration_ids=("c1",)
+    )
+
+
+def test_validate_axis_sets_zero_followers_is_valid():
+    _validate_axis_sets(
+        leaders=("l1", "l2"), followers=(), realsense_serials=("s1",), robot_calibration_ids=("c1",)
+    )
+
+
+def test_validate_axis_sets_zero_followers_needs_exactly_one_calibration_id():
+    with pytest.raises(ValueError, match="robot_calibration_ids must have 1 entry"):
         _validate_axis_sets(
-            leaders=(), followers=(), realsense_serials=("s1",), robot_calibration_ids=()
+            leaders=(), followers=(), realsense_serials=(), robot_calibration_ids=("c1", "c2")
         )
 
 
@@ -75,11 +87,10 @@ def test_validate_axis_sets_leader_follower_mismatch():
         )
 
 
-def test_validate_axis_sets_zero_realsense_serials():
-    with pytest.raises(ValueError, match="at least one RealSense serial"):
-        _validate_axis_sets(
-            leaders=("l1",), followers=("f1",), realsense_serials=(), robot_calibration_ids=("c1",)
-        )
+def test_validate_axis_sets_zero_realsense_serials_is_valid():
+    _validate_axis_sets(
+        leaders=("l1",), followers=("f1",), realsense_serials=(), robot_calibration_ids=("c1",)
+    )
 
 
 def test_validate_axis_sets_robot_calibration_ids_mismatch():
@@ -147,6 +158,97 @@ def test_non_positive_viser_port_raises():
         _minimal_config(viser_port=0)
 
 
+def test_no_followers_defaults_calibration_to_first_leader():
+    config = _minimal_config(followers=())
+
+    assert config.robot_calibration_ids == ("leader_arm",)
+    assert config.calibration_robot_type == "so101_leader"
+
+
+def test_no_followers_explicit_calibration_id_stays_follower_type():
+    config = _minimal_config(followers=(), robot_calibration_ids=("custom_id",))
+
+    assert config.robot_calibration_ids == ("custom_id",)
+    assert config.calibration_robot_type == "so101_follower"
+
+
+def test_no_leaders_or_followers_without_calibration_raises():
+    with pytest.raises(ValueError, match="set robot_calibration_ids or robot_calibration_paths"):
+        _minimal_config(leaders=(), followers=())
+
+
+def test_no_leaders_or_followers_with_calibration_id_is_valid():
+    config = _minimal_config(leaders=(), followers=(), realsense_serials=(), robot_calibration_ids=("x",))
+
+    assert config.robot_calibration_ids == ("x",)
+
+
+def test_no_leaders_or_followers_with_calibration_path_is_valid():
+    config = _minimal_config(leaders=(), followers=(), robot_calibration_paths=["~/calib.json"])
+
+    assert config.robot_calibration_paths == (Path("~/calib.json").expanduser(),)
+
+
+def _virtual_config(**overrides) -> TeleopSystemConfig:
+    kwargs = dict(
+        leaders=(),
+        followers=(),
+        realsense_serials=(),
+        robot_calibration_ids=("shared",),
+    )
+    kwargs.update(overrides)
+    return TeleopSystemConfig(**kwargs)
+
+
+def test_num_robots_defaults_to_one():
+    assert _virtual_config().num_robots == 1
+
+
+def test_num_robots_broadcasts_single_calibration_id():
+    config = _virtual_config(num_robots=3)
+
+    assert config.robot_calibration_ids == ("shared", "shared", "shared")
+
+
+def test_num_robots_broadcasts_single_calibration_path():
+    config = _virtual_config(num_robots=2, robot_calibration_paths=["~/calib.json"])
+
+    assert config.robot_calibration_paths == (Path("~/calib.json").expanduser(),) * 2
+
+
+def test_num_robots_keeps_per_robot_calibration_ids():
+    config = _virtual_config(num_robots=2, robot_calibration_ids=("a", "b"))
+
+    assert config.robot_calibration_ids == ("a", "b")
+
+
+def test_num_robots_wrong_calibration_id_count_raises():
+    with pytest.raises(ValueError, match="robot_calibration_ids must have 1 entry"):
+        _virtual_config(num_robots=3, robot_calibration_ids=("a", "b"))
+
+
+@pytest.mark.parametrize(
+    "devices",
+    [
+        {"leaders": (SO101AxisConfig(port="/dev/ttyACM0", id="leader_arm"),)},
+        {"followers": (SO101AxisConfig(port="/dev/ttyACM1", id="follower_arm"),)},
+    ],
+)
+def test_num_robots_above_one_with_leader_or_follower_raises(devices):
+    with pytest.raises(ValueError, match="num_robots > 1 is only supported"):
+        _virtual_config(num_robots=2, **devices)
+
+
+def test_num_robots_below_one_raises():
+    with pytest.raises(ValueError, match="num_robots must be >= 1"):
+        _virtual_config(num_robots=0)
+
+
+def test_non_positive_robot_grid_spacing_raises():
+    with pytest.raises(ValueError, match="robot_grid_spacing"):
+        _virtual_config(robot_grid_spacing=0.0)
+
+
 def test_explicit_robot_calibration_ids_preserved():
     config = _minimal_config(robot_calibration_ids=["custom_id"])
 
@@ -186,6 +288,24 @@ def test_load_teleop_system_config_end_to_end(teleop_config_yaml_factory):
     assert config.realsense_serials == ("000000000000",)
     assert config.camera_width == 640
     assert config.tune is False
+
+
+def test_load_teleop_system_config_empty_device_lists(teleop_config_yaml_factory):
+    path = teleop_config_yaml_factory({"followers": [], "realsense_serials": []})
+
+    config = load_teleop_system_config(str(path))
+
+    assert config.followers == ()
+    assert config.realsense_serials == ()
+    assert config.robot_calibration_ids == ("leader_arm",)
+
+
+def test_load_teleop_system_config_ignores_calibration_robot_type_key(teleop_config_yaml_factory):
+    path = teleop_config_yaml_factory({"calibration_robot_type": "so101_leader"})
+
+    config = load_teleop_system_config(str(path))
+
+    assert config.calibration_robot_type == "so101_follower"
 
 
 def test_load_teleop_system_config_ignores_unknown_keys(teleop_config_yaml_factory):

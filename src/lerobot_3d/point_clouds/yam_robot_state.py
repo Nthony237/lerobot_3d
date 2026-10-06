@@ -98,8 +98,13 @@ class YamRobotState:
             base_wxyz=tuple(Rotation.from_matrix(base[:3, :3]).as_quat()[[3, 0, 1, 2]]),
         )
 
-    def get_mesh_points(self, observation):
-        """Sampled visual surface in the URDF world, for existing mesh-based ICP."""
+    def get_mesh_points(self, observation, *, gripper_only=False):
+        """Mesh target in URDF world, or just this gripper in its own flange frame.
+
+        Gripper-local calibration needs only ``gripper_open``: arm joint angles
+        cancel between the camera mount and its own gripper. Camera meshes are
+        excluded from this target. Dimensions and finger travel come from URDF.
+        """
         # ICP's final 2 mm correspondence radius needs a denser target than the
         # lightweight display cloud. Cache these independent samples once.
         if self._calibration_points is None:
@@ -112,7 +117,16 @@ class YamRobotState:
                 )
                 for name, _, vertices, faces in self._meshes
             ]
+        if gripper_only:
+            # An arbitrary internal FK reference, never represented as feedback.
+            observation = {"position_rad": np.zeros(6), "gripper_open": observation["gripper_open"]}
         poses = self.robot_urdf.link_fk(cfg=self.get_joint_positions(observation), use_names=True)
+        reference = np.linalg.inv(poses[self.side + "_gripper"]) if gripper_only else np.eye(4)
+        gripper_links = {self.side + suffix for suffix in ("_gripper", "_tip_left", "_tip_right")}
         return np.concatenate(
-            [transform_points(poses[name], points) for name, points in self._calibration_points]
+            [
+                transform_points(reference @ poses[name], points)
+                for name, points in self._calibration_points
+                if not gripper_only or name in gripper_links
+            ]
         )

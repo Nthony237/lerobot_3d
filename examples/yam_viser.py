@@ -26,12 +26,31 @@ def frame_station(server):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("view", "export-mesh"))
+    parser.add_argument("mode", choices=("view", "export-mesh", "export-gripper"))
     parser.add_argument("--urdf", required=True, help="I2RT composed YAM v1 / linear_4310 station URDF")
-    parser.add_argument("--state", required=True, help="Saved paired state JSON; mode + arms")
+    parser.add_argument("--state", help="Saved paired state JSON; required for full-arm modes")
+    parser.add_argument("--side", choices=("left", "right"), help="Gripper to export")
+    parser.add_argument(
+        "--gripper-open", type=float, help="URDF opening 0=closed, 1=open; match the captured fingers"
+    )
     parser.add_argument("--output", help="New robot_pcd.npz for the existing icp.py workflow")
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
+    if args.mode == "export-gripper":
+        if args.side is None or args.gripper_open is None or not args.output:
+            parser.error("export-gripper requires --side, --gripper-open and --output")
+        state = YamRobotState(args.urdf, args.side)
+        points = state.get_mesh_points({"gripper_open": args.gripper_open}, gripper_only=True)
+        output = Path(args.output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("xb") as stream:
+            np.savez_compressed(stream, pcd=points)
+        print(
+            f"Saved {args.side} gripper-local target in metres; opening is model input, not joint feedback."
+        )
+        return
+    if not args.state:
+        parser.error("Full-arm modes require --state")
     metadata = load(args.state)
     if metadata.get("mode") not in ("live", "synthetic"):
         parser.error("State mode must be live (saved measurements) or synthetic (offline example)")

@@ -52,6 +52,27 @@ Supply the matching `calibration_files/<serial>/{color.png,depth.npz,mask.png}`,
 [Performing calibration](../README.md#performing-calibration). `icp.main(viewer)`
 also works offline without starting its subsequent local-camera preview.
 
+For a wrist view that sees only its own gripper, export that target instead:
+
+```bash
+python examples/yam_viser.py export-gripper --urdf "$YAM_URDF" --side left \
+  --gripper-open 1 --output calibration_files/robot_pcd.npz
+```
+
+This exports only the gripper housing and fingers, in `left_gripper` coordinates
+and metres. Arm angles cancel in this local frame; no arm feedback is invented
+or required. Match `--gripper-open` to the captured fingers (0 closed, 1 fully
+open). It is model input, not a measured encoder reading. Mask only the visible
+gripper, excluding the workbench, cable and camera body. Dimensions come directly
+from the URDF; no ruler measurements or rescaling are needed.
+
+For this local target, the existing ICP result named `X_WC` is actually
+`T_gripper_camera`, where C is the rectified color optical frame used by the
+input images. Record that target frame with the result. Use a nominal CAD mount
+only as an unfitted alignment seed. Limited, flat or symmetric visible surfaces
+may not constrain all six pose coordinates; inspect correspondence and validate
+on independent captures before accepting a fit.
+
 **Preserve the existing input conventions:** `depth.npz` is divided by 1000 in
 `icp.py`, so export depth in millimetres, not unconverted D405 counts. Register
 and rectify color/depth to the same pinhole grid described by the intrinsic JSON;

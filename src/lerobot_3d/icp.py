@@ -197,7 +197,7 @@ def main(viewer: AlignmentViewer):
         extrinsics[serial]['X_WC'] = np.asarray(T_wc_refined).tolist()
 
 
-    pc_list = []
+    clouds = {}
 
     for serial in serials:
 
@@ -209,20 +209,26 @@ def main(viewer: AlignmentViewer):
         # Load the image
         color = np.array(Image.open(os.path.join(serial_dir, "color.png")))
 
-        pcd= depth2pcd(depth, serial, color=color, T_wc=extrinsics[serial]['X_WC'])
-        pc_list.append(pcd)
-
-    merged_pc = o3d.geometry.PointCloud()
-    for p in pc_list:
-        merged_pc += p
+        # Camera frame: the fine-tune step below poses each cloud by its X_WC.
+        pcd = depth2pcd(depth, serial, color=color)
+        clouds[serial] = (
+            np.asarray(pcd.points),
+            np.asarray(pcd.colors) if pcd.has_colors() else None,
+        )
 
     viewer.remove("/moving")
-    viewer.show(
-        "/merged",
-        np.asarray(merged_pc.points),
-        np.asarray(merged_pc.colors) if merged_pc.has_colors() else None,
+    print(
+        "Review the merged result. Pick a camera in the dropdown to fine-tune its pose "
+        "against the others; Confirm saves, Abort keeps the poses from the steps above."
     )
-    viewer.wait_for_confirmation("Review merged result")
+    T_final = viewer.align_many(
+        clouds,
+        {serial: np.asarray(extrinsics[serial]['X_WC'], dtype=np.float64) for serial in serials},
+        title="Review / fine-tune merged result",
+        name_prefix="/merged/",
+    )
+    for serial in serials:
+        extrinsics[serial]['X_WC'] = T_final[serial].tolist()
 
     with open("extrinsic_calibration.json", "w") as f:
         json.dump(extrinsics, f, indent=8)

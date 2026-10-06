@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 
 import open3d as o3d
 import numpy as np
-import imageio
 import cv2
 
 from lerobot.robots.so101_follower import SO101FollowerConfig, SO101Follower
@@ -102,18 +101,12 @@ class SystemStateViewer:
             SO101Follower(SO101FollowerConfig(port=ax.port, id=ax.id)) for ax in config.followers
         ]
 
-        self.recording_name = config.recording_name
         self.segment_on_capture = config.segment_on_capture
         self._segmenter = RobotSegmenter(config.sam2_model_id)
         self._home_actions = None
         """Follower motor positions at startup; captures home here before segmenting."""
         self._resume_from = None
         """``(actions, start_time)`` to blend teleop targets from after homing, else ``None``."""
-
-        if self.recording_name != '':
-            self.record = True
-        else:
-            self.record = False
 
         self.quit=False
 
@@ -166,13 +159,6 @@ class SystemStateViewer:
         self.robot_state = self.robot_states[0]
 
         self.serials = serials
-        self.images = {}
-        self.depths = {}
-        self.robot_pcds = []
-
-        for serial in serials:
-            self.images[serial] = []
-            self.depths[serial] = []
 
     def update(self, *actions, masks_by_serial=None):
         # actions are simply joint states: one per follower, or one per virtual robot
@@ -246,12 +232,6 @@ class SystemStateViewer:
             if self.segment_on_capture:
                 self._home_followers()
                 self._segment_capture(datapoints, calibration_dir)
-
-        if self.record:
-            for datapoint in datapoints:
-                self.images[datapoint.serial].append(np.array(datapoint.color))
-                self.depths[datapoint.serial].append(np.array(datapoint.depth))
-            self.robot_pcds.append(np.array(robot_pcd_np))
 
         scene_pcd, _ = get_fused_point_cloud(
            datapoints
@@ -454,39 +434,6 @@ class SystemStateViewer:
         self._action_stop_event.set()
         if self._action_thread is not None:
             self._action_thread.join(timeout=1.0)
-
-        if self.record:
-
-            recording_dir = f"recordings/{self.recording_name}"
-
-            # remove task directory if it exists
-            if os.path.exists(recording_dir):
-                shutil.rmtree(recording_dir)
-
-            os.makedirs(recording_dir)
-
-            for serial in self.serials:
-
-                serial_dir = os.path.join(recording_dir, f"{serial}" )
-
-                # remove task directory if it exists
-                if os.path.exists(serial_dir):
-                    shutil.rmtree(serial_dir)
-
-                os.makedirs(serial_dir)
-
-                frames_rgb = [cv2.cvtColor(img, cv2.COLOR_BGR2RGB) for img in self.images[serial]]
-                frames_depth = self.depths[serial]
-
-                imageio.mimsave(
-                    os.path.join(serial_dir, "rgb.mp4"),
-                    frames_rgb,
-                    fps=30,
-                    codec="libx264"
-                )
-
-                np.savez_compressed(os.path.join(serial_dir, "depth.npz"), depth=np.array(frames_depth))
-            np.savez_compressed(os.path.join(recording_dir, "robot_pcd.npz"), pcd=np.array(self.robot_pcds))
 
         if self.stream is not None:
             write_intrinsics(self.stream.get_datapoints())

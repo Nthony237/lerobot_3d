@@ -244,7 +244,6 @@ def _virtual_robots_viewer(num_robots=1) -> SystemStateViewer:
     viewer.base_offsets = grid_offsets(num_robots, spacing=0.5)
     viewer.followers = []
     viewer.stream = None
-    viewer.record = False
     viewer.quit = False
     return viewer
 

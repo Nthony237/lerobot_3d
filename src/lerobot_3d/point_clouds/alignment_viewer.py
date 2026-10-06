@@ -118,31 +118,76 @@ class AlignmentViewer:
 
         Returns the confirmed 4x4 transform, or T_fallback if aborted.
         """
-        if T_fallback is None:
-            T_fallback = T_init
-        pts_cam = np.asarray(pts_cam)
+        result = self.align_many(
+            {"/moving": (pts_cam, None)},
+            {"/moving": T_init},
+            T_fallbacks=None if T_fallback is None else {"/moving": T_fallback},
+            title=title,
+            translate_steps=translate_steps,
+            rotate_steps_deg=rotate_steps_deg,
+        )
+        return result["/moving"]
 
-        state = {"T": T_init.copy(), "step_idx": 0, "done": False, "confirmed": False}
+    def align_many(
+        self,
+        clouds: dict[str, tuple[np.ndarray, np.ndarray | None]],
+        T_inits: dict[str, np.ndarray],
+        T_fallbacks: dict[str, np.ndarray] | None = None,
+        title: str = "Fine-tune",
+        name_prefix: str = "",
+        translate_steps=(0.002, 0.01, 0.05),  # meters: fine / medium / coarse
+        rotate_steps_deg=(1.0, 5.0, 20.0),
+    ) -> dict[str, np.ndarray]:
+        """:meth:`align` for several clouds at once, e.g. every camera of the merged result.
+
+        ``clouds`` maps a key to ``(pts_cam, colors)``; each is shown as scene node
+        ``name_prefix + key``, posed by ``T_inits[key]``. With more than one cloud, a
+        dropdown picks which one the buttons move (Reset only resets that one); the
+        others stay put, so each can be nudged against the rest and '/target'.
+
+        Blocks until Confirm or Abort. Returns ``{key: T}``: every confirmed transform,
+        or on Abort ``T_fallbacks`` (defaults to ``T_inits``).
+        """
+        if T_fallbacks is None:
+            T_fallbacks = T_inits
+        keys = list(clouds)
+        pts = {k: np.asarray(clouds[k][0]) for k in keys}
+        state = {
+            "T": {k: np.asarray(T_inits[k], dtype=np.float64).copy() for k in keys},
+            "selected": keys[0],
+            "step_idx": 0,
+            "done": False,
+            "confirmed": False,
+        }
 
         def status_text() -> str:
-            trans_cm, rot_deg = _pose_delta_summary(state["T"], T_init, pts_cam)
+            k = state["selected"]
+            trans_cm, rot_deg = _pose_delta_summary(state["T"][k], T_inits[k], pts[k])
             t_step = translate_steps[state["step_idx"]]
             r_step = rotate_steps_deg[state["step_idx"]]
+            prefix = f"moving: {k}\n" if len(keys) > 1 else ""
             return (
-                f"step: translate={t_step * 100:.1f}cm rotate={r_step:.1f}deg\n"
+                f"{prefix}step: translate={t_step * 100:.1f}cm rotate={r_step:.1f}deg\n"
                 f"delta from initial guess: {trans_cm:.2f}cm, {rot_deg:.2f}deg"
             )
 
+        def show_cloud(k) -> None:
+            T = state["T"][k]
+            pts_world = (T[:3, :3] @ pts[k].T).T + T[:3, 3]
+            self.show(name_prefix + k, pts_world, clouds[k][1])
+
         def refresh() -> None:
-            T = state["T"]
-            pts_world = (T[:3, :3] @ pts_cam.T).T + T[:3, 3]
-            self.show("/moving", pts_world, None)
+            show_cloud(state["selected"])
             text = status_text()
             status.value = text
             print(f"  {text}".replace("\n", "  |  "))
 
         folder = self.server.gui.add_folder(title)
         with folder:
+            selector = (
+                self.server.gui.add_dropdown("Camera", keys, initial_value=keys[0])
+                if len(keys) > 1 else None
+            )
             step_button = self.server.gui.add_button("Cycle step size")
             translate_buttons = [
                 (axis, self.server.gui.add_button(f"Translate {label}"))
@@ -159,16 +204,18 @@ class AlignmentViewer:
 
         def make_translate(axis_vec):
             def _cb(_) -> None:
+                k = state["selected"]
                 step = translate_steps[state["step_idx"]]
-                state["T"] = _translate_world(state["T"], np.array(axis_vec) * step)
+                state["T"][k] = _translate_world(state["T"][k], np.array(axis_vec) * step)
                 refresh()
 
             return _cb
 
         def make_rotate(axis_vec):
             def _cb(_) -> None:
+                k = state["selected"]
                 step = rotate_steps_deg[state["step_idx"]]
-                state["T"] = _rotate_about_centroid(state["T"], pts_cam, axis_vec, step)
+                state["T"][k] = _rotate_about_centroid(state["T"][k], pts[k], axis_vec, step)
                 refresh()
 
             return _cb
@@ -178,6 +225,12 @@ class AlignmentViewer:
         for axis_vec, button in rotate_buttons:
             button.on_click(make_rotate(axis_vec))
 
+        if selector is not None:
+            @selector.on_update
+            def _on_select(_) -> None:
+                state["selected"] = selector.value
+                refresh()
+
         @step_button.on_click
         def _on_cycle_step(_) -> None:
             state["step_idx"] = (state["step_idx"] + 1) % len(translate_steps)
@@ -185,7 +238,8 @@ class AlignmentViewer:
 
         @reset_button.on_click
         def _on_reset(_) -> None:
-            state["T"] = T_init.copy()
+            k = state["selected"]
+            state["T"][k] = np.asarray(T_inits[k], dtype=np.float64).copy()
             refresh()
 
         @confirm_button.on_click
@@ -198,6 +252,8 @@ class AlignmentViewer:
             state["confirmed"] = False
             state["done"] = True
 
+        for k in keys:
+            show_cloud(k)
         refresh()
         print(f"{title}: use the GUI buttons to translate/rotate, then Confirm or Abort.")
 
@@ -206,7 +262,12 @@ class AlignmentViewer:
 
         folder.remove()
 
-        return state["T"] if state["confirmed"] else T_fallback
+        if not state["confirmed"]:
+            # Redraw so the scene shows the poses actually being returned.
+            for k in keys:
+                state["T"][k] = np.asarray(T_fallbacks[k], dtype=np.float64)
+                show_cloud(k)
+        return state["T"]
 
     def wait_for_confirmation(self, title: str, button_label: str = "Done") -> None:
         """Block until the user acknowledges what's currently shown (e.g. a final preview)."""

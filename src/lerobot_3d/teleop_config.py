@@ -108,8 +108,6 @@ class TeleopSystemConfig:
     followers: tuple[SO101AxisConfig, ...]
     realsense_serials: tuple[str, ...]
     extrinsic_json: str = "extrinsic_calibration.json"
-    recording_name: str = ""
-    """Non-empty → write ``recordings/<name>/`` on shutdown."""
     urdf_path: str | None = None
     """``None`` → bundled ``so101_new_calib.urdf`` under package ``calibration/``."""
     robot_calibration_ids: tuple[str, ...] | None = None

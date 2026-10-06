@@ -62,7 +62,6 @@ realsense_serials:
   - "244622072067"
 
 extrinsic_json: extrinsic_calibration.json
-recording_name: ""
 tune: true
 camera_width: 848
 camera_height: 480
@@ -131,6 +130,21 @@ links = frame_link_pcds(item)                     # {link_name: (N, 3)} world fr
 
 To record from your own loop (e.g. with `step(action)`), use `LeRobotDatasetRecorder` directly: `start_episode()`, `add_frame(datapoints, robot_states[0], action)`, `stop_episode()`, then `save_episode()` or `discard_episode()`, and `finalize()` at the end.
 
+### Pushing a dataset to the Hugging Face Hub
+
+1. Log in once with a token that has write access (`hf auth whoami` checks who you're logged in as):
+   ```bash
+   hf auth login
+   ```
+2. Make sure `dataset_repo_id` is `<your-hf-username>/<name>` (e.g. `Sorozco0612/pusht`), not `local/...`: the repo id is the Hub repo the dataset is pushed to.
+3. Quit `lerobot-teleop` first so the dataset is finalized, then push:
+   ```bash
+   python -c "from lerobot.datasets.lerobot_dataset import LeRobotDataset; LeRobotDataset('Sorozco0612/pusht').push_to_hub(private=True, upload_large_folder=True)"
+   ```
+   Pass `root=...` to `LeRobotDataset` if you set `dataset_root`. This creates the dataset repo if needed, uploads everything under the dataset root except the temporary `images/` folder (including the `meta/lerobot_3d.json` sidecar), writes a dataset card, and tags the revision with the LeRobot codebase version. `upload_large_folder=True` uploads in resumable chunks. Use it, because depth frames make these datasets several GB. Drop `private=True` to make the dataset public.
+
+Pushing again after recording more episodes re-uploads the changed files. Anyone can then load it with `LeRobotDataset("Sorozco0612/pusht")`, which downloads it on first use.
+
 ## Performing calibration
 
 <p align="center">
@@ -158,7 +172,8 @@ To record from your own loop (e.g. with `step(action)`), use `LeRobotDatasetReco
    python -m lerobot_3d.icp
    ```
 5. For each camera, the viser GUI shows translate/rotate buttons (±X/±Y/±Z), a step-size cycle button, reset, confirm, and abort — nudge the point cloud onto the robot mesh, then **Confirm**. ICP then refines the confirmed pose automatically and shows the result for a second confirm/abort.
-6. The refined `extrinsic_calibration.json` is written back — ready for `lerobot-teleop`.
+6. Once every camera is done, all of them are shown together in color over the robot mesh, in a **Review / fine-tune merged result** panel. Pick a camera in the **Camera** dropdown and nudge it with the same buttons to line it up against the other cameras (**Reset** undoes that camera's nudges only). **Confirm** keeps the fine-tuned poses. **Abort** keeps the poses from step 5.
+7. The refined `extrinsic_calibration.json` is written back — ready for `lerobot-teleop`.
 
 ## Custom teleop script
 

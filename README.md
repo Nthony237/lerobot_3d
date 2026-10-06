@@ -30,6 +30,12 @@ pip install -e ".[realsense]"
 
 (`realsense` pulls in `pyrealsense2`, required to stream RealSense cameras.)
 
+## YAM URDF and mesh calibration
+
+The [YAM review example](docs/YAM.md) renders saved dual-arm joint states in
+Viser and reuses the mesh-based manual alignment/ICP workflow. It is an offline
+addition pending end-to-end review, with live hardware integration separate.
+
 ## Teleop (`lerobot-teleop`)
 
 Drives **N SO101 follower** arms from **N SO101 leader** teleoperators while streaming **one or more Intel RealSense** cameras, fusing depth into a scene point cloud, sampling the first follower's URDF for a robot point cloud, and rendering all of it live in **viser**.

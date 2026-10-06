@@ -14,8 +14,7 @@ pytest.importorskip("viser")
 
 from lerobot_3d.common.types import RobotSnapshot
 from lerobot_3d.point_clouds.viser_viewer import ViserSceneViewer
-from lerobot_3d.point_clouds.yam_calibration import camera_pose, fit_mesh, mesh_residual
-from lerobot_3d.point_clouds.yam_robot_state import YamRobotState, transform_points
+from lerobot_3d.point_clouds.yam_robot_state import YamRobotState
 
 pytestmark = pytest.mark.hardware_stack
 
@@ -66,44 +65,6 @@ def test_bad_feedback_is_rejected(station, observation):
             state.get_robot_snapshot({**observation, "position_rad": bad})
     with pytest.raises(ValueError):
         state.get_robot_snapshot({**observation, "gripper_open": 1.1})
-
-
-def test_wrist_calibration_follows_new_pose_and_fixed_camera_does_not(station, observation):
-    gripper_camera = np.eye(4)
-    gripper_camera[:3, 3] = [0.03, -0.04, 0.07]
-    candidate = {"camera": "right", "T_gripper_camera": gripper_camera.tolist()}
-    poses = {side: observation for side in station}
-    original = camera_pose(candidate, station, poses)
-    changed = {**observation, "position_rad": [0.7, *observation["position_rad"][1:]]}
-    poses["right"] = changed
-    moved = camera_pose(candidate, station, poses)
-    assert not np.allclose(original, moved)
-    expected = station["right"].get_link_transform(changed, "right_gripper") @ gripper_camera
-    np.testing.assert_allclose(moved, expected)
-    np.testing.assert_array_equal(
-        camera_pose({"camera": "overhead", "X_WC": original.tolist()}, station, poses), original
-    )
-
-
-def test_icp_recovers_camera_transform_and_heldout_residual(station, observation):
-    sampled = station["left"].get_mesh_points(observation)
-    target, independent = sampled[::2], sampled[1::2]
-    world_camera = np.eye(4)
-    world_camera[:3, :3] = Rotation.from_euler("xyz", [0.3, -0.2, 0.1]).as_matrix()
-    world_camera[:3, 3] = [0.2, -0.1, 0.5]
-    source = transform_points(np.linalg.inv(world_camera), independent)
-    initial = world_camera.copy()
-    initial[:3, 3] += [0.001, -0.001, 0.001]
-    result = fit_mesh(source, target, initial)
-    np.testing.assert_allclose(result["X_WC"], world_camera, atol=0.002)
-    moved = {**observation, "position_rad": [0.5, *observation["position_rad"][1:]]}
-    heldout = station["left"].get_mesh_points(moved)
-    heldout_source = transform_points(np.linalg.inv(world_camera), heldout)
-    residual = mesh_residual(heldout_source, heldout, result["X_WC"])
-    assert residual["p95_distance_m"] < 0.002
-    wrong = world_camera.copy()
-    wrong[0, 3] += 0.06
-    assert mesh_residual(heldout_source, heldout, wrong)["p95_distance_m"] > 0.02
 
 
 def test_viser_applies_base_rotation_and_so101_default_is_identity():

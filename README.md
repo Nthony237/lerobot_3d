@@ -32,9 +32,23 @@ pip install -e ".[realsense]"
 
 ## YAM URDF and mesh calibration
 
-The [YAM review example](docs/YAM.md) renders saved dual-arm joint states in
-Viser and reuses the mesh-based manual alignment/ICP workflow. It is an offline
-addition pending end-to-end review, with live hardware integration separate.
+`examples/yam_viser.py` renders saved poses from the I2RT YAM v1 / linear_4310
+station URDF and exports mesh targets for the existing calibration workflow.
+Use I2RT revision `120c3c81400171174604e503943f8d1ebc891058` and its
+`i2rt/robot_models/station/yam_station_linear_4310_d405/yam_station_linear_4310_d405.urdf`.
+
+```bash
+python examples/yam_viser.py view --urdf "$YAM_URDF" --state pose.json
+python examples/yam_viser.py export-gripper --urdf "$YAM_URDF" --side left --gripper-open 1 --output calibration_files/robot_pcd.npz
+```
+
+State JSON contains `mode` (`live` or `synthetic`) and `arms.left`/`arms.right`,
+each with six `position_rad` values and `gripper_open` (0 closed, 1 open).
+`export-mesh` uses `--state`/`--output`; measured states additionally require
+`stationary_capture_confirmed: true`. Gripper targets use metres in the named
+gripper frame; the fitted transform is camera-to-gripper. Prepare rectified,
+registered images with depth in millimetres for the existing ICP reader.
+Nominal mounts and synthetic poses are not calibrated transforms or live feedback.
 
 ## Teleop (`lerobot-teleop`)
 

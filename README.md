@@ -50,6 +50,24 @@ gripper frame; the fitted transform is camera-to-gripper. Prepare rectified,
 registered images with depth in millimetres for the existing ICP reader.
 Nominal mounts and synthetic poses are not calibrated transforms or live feedback.
 
+### Live YAM viewer (ROS 2)
+
+`lerobot_3d.point_clouds.yam_live_viewer` shows live data in viser: measured joints from a
+`sensor_msgs/JointState` topic (`<side>_joint1..6` rad, optional `<side>_joint7` finger travel in m)
+pose the station URDF, and each wrist camera's color image and depth cloud are drawn at the URDF
+camera link it is mounted on. It only subscribes; it never commands the robot. Needs a ROS 2
+environment with `rclpy` (no `pyrealsense2`).
+
+```bash
+python -m lerobot_3d.point_clouds.yam_live_viewer --urdf "$YAM_URDF" \
+  --camera /camera/left_wrist=left_camera --camera /camera/right_wrist=right_camera
+```
+
+Each camera namespace provides `color/image_raw/compressed`, `color/camera_info`, a lossless PNG
+depth `CompressedImage` (`--depth-topic`, default `depth_raw/image_rect_raw/compressedDepth`) and its
+`camera_info`; depth-to-color extrinsics are read from `/tf_static`. Camera poses are the URDF's
+nominal mounts until calibrated. The sidebar reports per-arm and per-camera freshness.
+
 ## Teleop (`lerobot-teleop`)
 
 Drives **N SO101 follower** arms from **N SO101 leader** teleoperators while streaming **one or more Intel RealSense** cameras, fusing depth into a scene point cloud, sampling the first follower's URDF for a robot point cloud, and rendering all of it live in **viser**.

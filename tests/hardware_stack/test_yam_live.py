@@ -130,10 +130,10 @@ def test_viewer_tick_places_camera_cloud_at_measured_fk(urdf):
     from lerobot_3d.point_clouds.yam_live_viewer import YamLiveViewer
 
     obs = {"position_rad": np.array([0.3, 1.0, 1.2, 0.1, -0.2, 0.4]), "gripper_open": 0.5}
-    source = FakeSource({"left": ArmSample(obs, True, 0.0, 1e12)}, {"/camera/left_wrist": _camera()})
+    source = FakeSource({"left": ArmSample(obs, True, 1e12)}, {"/camera/left_wrist": _camera()})
     viewer = YamLiveViewer(urdf, source, {"/camera/left_wrist": "left_camera",
                                           "/camera/right_wrist": "right_camera"},
-                           port=_free_port(), host="127.0.0.1")
+                           port=_free_port())
     try:
         viewer.tick()
         node = viewer._cam_nodes["/camera/left_wrist"]
@@ -146,7 +146,7 @@ def test_viewer_tick_places_camera_cloud_at_measured_fk(urdf):
         assert "0.50 open (from left_joint7)" in status and "waiting for `right_joint1..6`" in status
         assert "nominal URDF mount" in status
         # Joints outside the URDF limits are reported, not clipped or drawn.
-        source.arms["left"] = ArmSample({**obs, "position_rad": np.full(6, 9.0)}, True, 0.0, 1e12)
+        source.arms["left"] = ArmSample({**obs, "position_rad": np.full(6, 9.0)}, True, 1e12)
         viewer.tick()
         assert "left**: not drawn" in viewer._status.content
     finally:

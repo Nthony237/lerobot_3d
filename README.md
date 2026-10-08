@@ -52,21 +52,18 @@ Nominal mounts and synthetic poses are not calibrated transforms or live feedbac
 
 ### Live YAM viewer (ROS 2)
 
-`lerobot_3d.point_clouds.yam_live_viewer` shows live data in viser: measured joints from a
-`sensor_msgs/JointState` topic (`<side>_joint1..6` rad, optional `<side>_joint7` finger travel in m)
-pose the station URDF, and each wrist camera's color image and depth cloud are drawn at the URDF
-camera link it is mounted on. It only subscribes; it never commands the robot. Needs a ROS 2
-environment with `rclpy` (no `pyrealsense2`).
+Read-only live view in viser: measured joints from `/joint_states` (`<side>_joint1..6` rad, optional
+`<side>_joint7` finger travel in m) pose the station URDF, and each wrist camera's image and depth cloud
+are drawn at its URDF camera link (nominal mount until calibrated). Needs `rclpy`.
 
 ```bash
-python -m lerobot_3d.point_clouds.yam_live_viewer --urdf "$YAM_URDF" \
-  --camera /camera/left_wrist=left_camera --camera /camera/right_wrist=right_camera
+python -m lerobot_3d.point_clouds.yam_live_viewer --urdf "$YAM_URDF"
 ```
 
-Each camera namespace provides `color/image_raw/compressed`, `color/camera_info`, a lossless PNG
-depth `CompressedImage` (`--depth-topic`, default `depth_raw/image_rect_raw/compressedDepth`) and its
-`camera_info`; depth-to-color extrinsics are read from `/tf_static`. Camera poses are the URDF's
-nominal mounts until calibrated. The sidebar reports per-arm and per-camera freshness.
+Each `--camera NAMESPACE=LINK` (default `/camera/left_wrist=left_camera`, `/camera/right_wrist=right_camera`)
+reads `color/image_raw/compressed`, `depth_raw/image_rect_raw/compressedDepth` (lossless PNG), both
+`camera_info` topics, and depth-to-color extrinsics from `/tf_static`. `--stride`, `--max-depth` and
+`--point-size` tune the clouds.
 
 ## Teleop (`lerobot-teleop`)
 

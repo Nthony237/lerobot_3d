@@ -1,13 +1,9 @@
 """Live YAM joint states and wrist RGB-D frames from ROS 2 topics (read-only, no commands).
 
-Joints come from one ``sensor_msgs/JointState`` topic using the YAM station URDF names
-(``<side>_joint1..6`` in radians, optional ``<side>_joint7`` finger travel in metres).
-Each camera namespace provides ``color/image_raw/compressed``, a depth ``CompressedImage``
-(lossless PNG) and both ``camera_info`` topics; the depth-to-color extrinsics are read from
-``/tf_static`` when published. Everything is stored as "latest sample + arrival time" so a
-viewer can show staleness instead of silently drawing old data.
-
-``rclpy`` is imported lazily; the parsing helpers below are plain functions for testing.
+Joints: one ``sensor_msgs/JointState`` topic with the YAM station URDF names (``<side>_joint1..6``
+in radians, optional ``<side>_joint7`` finger travel in metres). Cameras: per namespace, the
+topics below plus the depth-to-color extrinsics from ``/tf_static``. Only the latest sample and
+its arrival time are kept, so a viewer can show staleness.
 """
 from __future__ import annotations
 
@@ -18,6 +14,12 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from lerobot_3d.point_clouds.rgbd import decode_color, decode_depth
+
+SIDES = ("left", "right")
+COLOR_TOPIC = "color/image_raw/compressed"
+COLOR_INFO_TOPIC = "color/camera_info"
+DEPTH_TOPIC = "depth_raw/image_rect_raw/compressedDepth"
+DEPTH_INFO_TOPIC = "depth_raw/camera_info"
 
 
 def joint_observation(names, positions, side: str, finger_travel: float | None):
@@ -66,10 +68,6 @@ def lookup_transform(edges: dict, parent: str, child: str) -> np.ndarray | None:
     return None
 
 
-def _stamp(msg) -> float:
-    return msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-
-
 @dataclass
 class CameraFrame:
     """Latest decoded frame for one camera. ``T_color_depth`` is ``None`` until TF arrives."""
@@ -92,26 +90,13 @@ class CameraFrame:
 class ArmSample:
     observation: dict
     gripper_reported: bool
-    stamp: float
     arrival: float
 
 
 class RosYamSource:
     """Background ``rclpy`` subscriber. ``latest()`` returns copies safe to use from another thread."""
 
-    def __init__(
-        self,
-        sides=("left", "right"),
-        cameras=("/camera/left_wrist", "/camera/right_wrist"),
-        *,
-        joint_topic: str = "/joint_states",
-        finger_travel: dict[str, float] | None = None,
-        depth_topic: str = "depth_raw/image_rect_raw/compressedDepth",
-        depth_info_topic: str = "depth_raw/camera_info",
-        color_topic: str = "color/image_raw/compressed",
-        color_info_topic: str = "color/camera_info",
-        node_name: str = "lerobot_3d_yam_viewer",
-    ):
+    def __init__(self, cameras, *, joint_topic: str = "/joint_states", finger_travel: dict[str, float]):
         import rclpy
         from rclpy.executors import SingleThreadedExecutor
         from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -121,15 +106,13 @@ class RosYamSource:
         if not rclpy.ok():
             rclpy.init()
         self._rclpy = rclpy
-        self.sides = tuple(sides)
-        self.finger_travel = finger_travel or {}
+        self.finger_travel = finger_travel
         self._lock = threading.Lock()
         self._arms: dict[str, ArmSample] = {}
         self._cameras: dict[str, CameraFrame] = {ns: CameraFrame() for ns in cameras}
         self._tf_edges: dict[tuple[str, str], np.ndarray] = {}
-        self.joint_messages = 0
 
-        self.node = rclpy.create_node(node_name)
+        self.node = rclpy.create_node("lerobot_3d_yam_viewer")
         sensor_qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
         self.node.create_subscription(JointState, joint_topic, self._on_joints, 10)
         self.node.create_subscription(
@@ -139,13 +122,13 @@ class RosYamSource:
         for ns in cameras:
             ns = ns.rstrip("/")
             self.node.create_subscription(
-                CompressedImage, f"{ns}/{color_topic}", lambda m, n=ns: self._on_color(n, m), sensor_qos)
+                CompressedImage, f"{ns}/{COLOR_TOPIC}", lambda m, n=ns: self._on_color(n, m), sensor_qos)
             self.node.create_subscription(
-                CompressedImage, f"{ns}/{depth_topic}", lambda m, n=ns: self._on_depth(n, m), sensor_qos)
+                CompressedImage, f"{ns}/{DEPTH_TOPIC}", lambda m, n=ns: self._on_depth(n, m), sensor_qos)
             self.node.create_subscription(
-                CameraInfo, f"{ns}/{color_info_topic}", lambda m, n=ns: self._on_info(n, m, "color"), sensor_qos)
+                CameraInfo, f"{ns}/{COLOR_INFO_TOPIC}", lambda m, n=ns: self._on_info(n, m, "color"), sensor_qos)
             self.node.create_subscription(
-                CameraInfo, f"{ns}/{depth_info_topic}", lambda m, n=ns: self._on_info(n, m, "depth"), sensor_qos)
+                CameraInfo, f"{ns}/{DEPTH_INFO_TOPIC}", lambda m, n=ns: self._on_info(n, m, "depth"), sensor_qos)
 
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self.node)
@@ -161,11 +144,10 @@ class RosYamSource:
     def _on_joints(self, msg) -> None:
         now = time.monotonic()
         with self._lock:
-            self.joint_messages += 1
-            for side in self.sides:
+            for side in SIDES:
                 parsed = joint_observation(msg.name, msg.position, side, self.finger_travel.get(side))
                 if parsed is not None:
-                    self._arms[side] = ArmSample(parsed[0], parsed[1], _stamp(msg), now)
+                    self._arms[side] = ArmSample(parsed[0], parsed[1], now)
 
     def _on_tf_static(self, msg) -> None:
         with self._lock:
@@ -224,7 +206,7 @@ class RosYamSource:
     # --- consumer API ------------------------------------------------------------------------
     def latest(self) -> tuple[dict[str, ArmSample], dict[str, CameraFrame]]:
         with self._lock:
-            arms = {k: ArmSample(dict(v.observation), v.gripper_reported, v.stamp, v.arrival)
+            arms = {k: ArmSample(dict(v.observation), v.gripper_reported, v.arrival)
                     for k, v in self._arms.items()}
             cams = {k: CameraFrame(**vars(v)) for k, v in self._cameras.items()}
             for cam in cams.values():
